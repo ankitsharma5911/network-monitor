@@ -1,4 +1,5 @@
-// Runnable check for the outage / slowdown state machine in src/services/networkMonitor.ts.
+// Runnable check for the outage / slowdown state machine in src/services/networkMonitor.ts,
+// plus the in-app update check in src/services/updateCheck.ts.
 // Run: node scripts/check-monitor.js   (no device needed: NetInfo, storage, location and fetch are faked)
 const assert = require('assert');
 const fs = require('fs');
@@ -60,14 +61,14 @@ const stubs = {
   'expo-location': Location,
   './storage': storage,
   '../../modules/background-monitor': { __esModule: true, default: null }, // null = Expo Go, no native module
+  'expo-constants': { __esModule: true, default: { expoConfig: { version: '1.1.0' } } }, // the installed app
 };
 const realRequire = Module.prototype.require;
 Module.prototype.require = function (id) { return id in stubs ? stubs[id] : realRequire.apply(this, arguments); };
 
+const compilerOptions = { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true };
 const file = path.join(__dirname, '../src/services/networkMonitor.ts');
-const { outputText } = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
-});
+const { outputText } = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions });
 // A fresh monitor instance wired to the given native BackgroundMonitor (or null).
 function loadMonitor(native) {
   stubs['../../modules/background-monitor'].default = native;
@@ -180,6 +181,25 @@ const last = () => all()[all().length - 1];
   assert.ok(warnings.some((w) => w.includes('background service unavailable')), 'falls back with a warning');
   assert.strictEqual(tick, null, 'no dangling tick listener after the failed start');
   monitor.stop();
+
+  // --- in-app update check ---------------------------------------------------
+  const updFile = path.join(__dirname, '../src/services/updateCheck.ts');
+  const upd = new Module(updFile);
+  upd.filename = updFile;
+  upd._compile(ts.transpileModule(fs.readFileSync(updFile, 'utf8'), { compilerOptions }).outputText, updFile);
+  const { isNewer, findUpdate } = upd.exports;
+  assert.ok(isNewer('1.10.0', '1.9.2') && isNewer('2.0.0', '1.99.99') && isNewer('1.2', '1.1.9'), 'numeric, part by part');
+  assert.ok(!isNewer('1.1.0', '1.1.0') && !isNewer('1.0.9', '1.1.0'), 'same or older is not newer');
+  const latestRelease = (tag, assets) => { global.fetch = async () => ({ ok: true, json: async () => ({ tag_name: tag, assets }) }); };
+  const apk = [{ name: 'network-monitor-v1.2.0.apk', browser_download_url: 'https://example/app.apk' }];
+  latestRelease('v1.2.0', apk);
+  assert.deepStrictEqual(await findUpdate(), { version: '1.2.0', apkUrl: 'https://example/app.apk' }, 'newer release offered');
+  latestRelease('v1.1.0', apk);
+  assert.strictEqual(await findUpdate(), null, 'already on the latest version');
+  latestRelease('v1.3.0', []);
+  assert.strictEqual(await findUpdate(), null, 'release whose APK is not attached yet');
+  global.fetch = async () => ({ ok: false });
+  assert.strictEqual(await findUpdate(), null, 'GitHub unreachable or rate-limited');
 
   console.log('check-monitor: all assertions passed');
 })().catch((e) => {

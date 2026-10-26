@@ -37,6 +37,7 @@ Everything runs on the phone. There is no server and no account: events are stor
 - **History.** Filter by outages or slowdowns, add a note to any event, delete events.
 - **Dashboard.** Live status, latency, connection type, outage count, total downtime.
 - **CSV export.** Share the full log to WhatsApp, Drive, email, etc.
+- **Update notice.** On launch, the app checks this repository's latest GitHub Release and offers to download it if it's newer.
 
 ---
 
@@ -102,6 +103,8 @@ git push --follow-tags     # pushes the commit and the tag → CI builds and pub
 ```
 
 Use `patch` for bug-fix releases (1.2.0 → 1.2.1) and `major` for big changes (1.2.0 → 2.0.0). The release job refuses to run if the tag and `package.json` disagree.
+
+Installed apps (1.2.0 and later) see an **"Update available"** prompt on their next launch once the release's APK is attached. [`src/services/updateCheck.ts`](src/services/updateCheck.ts) reads `releases/latest` from the GitHub API, compares its tag with the app's version, and opens the APK link in the browser.
 
 Android's internal `versionCode` is not in the repo: EAS stores it and adds 1 on every build (`appVersionSource: remote`, `autoIncrement` in [`eas.json`](eas.json)), so each APK can always install over the previous one.
 
@@ -508,7 +511,7 @@ The CSV is written to a file in the app's cache folder and shared with `expo-sha
 npm run check
 ```
 
-[`scripts/check-monitor.js`](scripts/check-monitor.js) loads the real `networkMonitor.ts` with simulated NetInfo, storage, location and network, and walks through:
+[`scripts/check-monitor.js`](scripts/check-monitor.js) loads the real `networkMonitor.ts` and `updateCheck.ts` with simulated NetInfo, storage, location, network and GitHub, and walks through:
 
 - healthy start logs nothing
 - Wi-Fi drop reported twice → exactly one outage, correct start time, tagged `wifi`, location captured
@@ -520,6 +523,7 @@ npm run check
 - refresh while stopped → live status updates, nothing logged
 - APK path: the foreground service is started with the 30 s interval, a native tick plus the native probe log an outage, Stop ends the service
 - Android refuses to start the service → falls back to a JS interval, no leftover listener
+- update check: versions compared numerically (1.10.0 > 1.9.2); prompts only for a newer release that has its APK attached; stays quiet when GitHub can't be reached
 
 The Kotlin code and the screens are not covered by automated tests; verify them on a device with the steps in [Trying it out on a phone](#trying-it-out-on-a-phone).
 
