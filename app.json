@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "network-monitor",
-    "slug": "network-monitor",
+    "name": "Network Monitor",
+    "slug": "network-moniter",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -10,6 +10,13 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.netmonitor.app",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -18,8 +25,23 @@
       },
       "predictiveBackGestureEnabled": false
     },
+    "plugins": [
+      "expo-sqlite",
+      "expo-sharing",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Network Monitor to record where outages happen."
+        }
+      ]
+    ],
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "0a0fc45f-2e19-4ea0-8a99-31411012943b"
+      }
     }
   }
 }
