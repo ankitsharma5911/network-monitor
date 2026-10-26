@@ -55,7 +55,12 @@ const warnings = [];
 console.warn = (...a) => warnings.push(a.join(' '));
 
 // --- load the real monitor with the fakes wired in -----------------------
-const stubs = { '@react-native-community/netinfo': { __esModule: true, default: NetInfo }, 'expo-location': Location, './storage': storage };
+const stubs = {
+  '@react-native-community/netinfo': { __esModule: true, default: NetInfo },
+  'expo-location': Location,
+  './storage': storage,
+  '../../modules/background-monitor': { __esModule: true, default: null }, // null = Expo Go, no native module
+};
 const realRequire = Module.prototype.require;
 Module.prototype.require = function (id) { return id in stubs ? stubs[id] : realRequire.apply(this, arguments); };
 
@@ -63,10 +68,15 @@ const file = path.join(__dirname, '../src/services/networkMonitor.ts');
 const { outputText } = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 });
-const mod = new Module(file);
-mod.filename = file;
-mod._compile(outputText, file);
-const monitor = mod.exports.networkMonitor;
+// A fresh monitor instance wired to the given native BackgroundMonitor (or null).
+function loadMonitor(native) {
+  stubs['../../modules/background-monitor'].default = native;
+  const mod = new Module(file);
+  mod.filename = file;
+  mod._compile(outputText, file);
+  return mod.exports.networkMonitor;
+}
+let monitor = loadMonitor(null);
 
 const settle = async () => { for (let i = 0; i < 20; i++) { await monitor.queue; await new Promise((r) => setImmediate(r)); } };
 const all = () => [...rows.values()];
@@ -133,7 +143,44 @@ const last = () => all()[all().length - 1];
   await monitor.refresh();
   assert.deepStrictEqual([rows.size, monitor.live.status], [3, 'down']);
 
+  // --- APK path: the native foreground service drives ticks and probes -----------------------
+  const calls = [];
+  let tick = null;
+  const native = {
+    start: (ms) => calls.push(['start', ms]),
+    stop: () => calls.push(['stop']),
+    probe: async () => {
+      const ms = probes.length ? probes.shift() : 100;
+      if (ms !== null) now += ms;
+      return ms;
+    },
+    addListener: (event, cb) => { tick = cb; return { remove: () => { tick = null; } }; },
+  };
+  global.fetch = () => { throw new Error('fetch used although the native probe exists'); };
+  netState = ONLINE;
+  monitor = loadMonitor(native);
+  monitor.start();
+  await settle();
+  assert.deepStrictEqual(calls, [['start', 30000]], 'foreground service started with the sample interval');
+  const before = rows.size;
+  probes = [null, null];
+  tick(); // what the service does every 30 s, also in the background
+  await settle();
+  assert.deepStrictEqual([rows.size, last().status], [before + 1, 'down'], 'native tick + native probe log an outage');
+  monitor.stop();
+  await settle();
+  assert.deepStrictEqual([calls[calls.length - 1], tick], [['stop'], null], 'stop ends the service and the tick listener');
+
   assert.deepStrictEqual(warnings, [], 'no check threw');
+
+  // Android refuses to start the service (e.g. started from the background) -> JS interval instead
+  monitor = loadMonitor({ ...native, start: () => { throw new Error('ForegroundServiceStartNotAllowedException'); } });
+  monitor.start();
+  await settle();
+  assert.ok(warnings.some((w) => w.includes('background service unavailable')), 'falls back with a warning');
+  assert.strictEqual(tick, null, 'no dangling tick listener after the failed start');
+  monitor.stop();
+
   console.log('check-monitor: all assertions passed');
 })().catch((e) => {
   console.error(e);

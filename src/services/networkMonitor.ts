@@ -1,5 +1,6 @@
 import NetInfo, { NetInfoState } from '@react-native-community/netinfo';
 import * as Location from 'expo-location';
+import BackgroundMonitor from '../../modules/background-monitor';
 import { EventStatus, LiveStatus } from '../types';
 import { insertEvent, updateEvent, getSettings, saveSettings } from './storage';
 
@@ -20,6 +21,8 @@ type Active = {
 // Round-trip time of one request to a 204 endpoint, or null if it failed, timed out,
 // or got anything but 204 (captive portal / login page).
 async function probe(timeoutMs: number): Promise<number | null> {
+  // Native probe in the APK: its timeout still fires in the background, where JS timers are frozen.
+  if (BackgroundMonitor) return BackgroundMonitor.probe(PROBE_URL, timeoutMs);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const start = Date.now();
@@ -33,13 +36,34 @@ async function probe(timeoutMs: number): Promise<number | null> {
   }
 }
 
+// Periodic probe catches slowdowns, which NetInfo never reports. In the APK the ticks come from a
+// foreground service (persistent notification) so they keep coming in the background; in Expo Go,
+// or if Android refuses to start the service, a JS interval does it while the app is open.
+function startTicks(onTick: () => void): () => void {
+  if (BackgroundMonitor) {
+    const sub = BackgroundMonitor.addListener('onTick', onTick);
+    try {
+      BackgroundMonitor.start(SAMPLE_INTERVAL_MS, 'Network Monitor', 'Logging outages and slowdowns');
+      return () => {
+        sub.remove();
+        BackgroundMonitor?.stop();
+      };
+    } catch (e) {
+      sub.remove();
+      console.warn('[networkMonitor] background service unavailable, monitoring only while open', e);
+    }
+  }
+  const id = setInterval(onTick, SAMPLE_INTERVAL_MS);
+  return () => clearInterval(id);
+}
+
 class NetworkMonitor {
   live: LiveStatus | null = null;
   private running = false;
   private active: Active | null = null; // the currently-open down/slow event
   private lastType: string | null = null;
   private unsubscribeNetInfo: (() => void) | null = null;
-  private interval: ReturnType<typeof setInterval> | null = null;
+  private stopTicks: (() => void) | null = null;
   // Checks run one at a time in arrival order, so two can never both open an event.
   private queue: Promise<void> = Promise.resolve();
   private listeners = new Set<() => void>();
@@ -76,10 +100,9 @@ class NetworkMonitor {
     this.unsubscribeNetInfo = NetInfo.addEventListener((state) => {
       this.enqueue(state);
     });
-    // Periodic probe catches slowdowns, which NetInfo never reports.
-    this.interval = setInterval(() => {
+    this.stopTicks = startTicks(() => {
       this.enqueue();
-    }, SAMPLE_INTERVAL_MS);
+    });
     this.emit();
   }
 
@@ -88,8 +111,8 @@ class NetworkMonitor {
     this.running = false;
     this.unsubscribeNetInfo?.();
     this.unsubscribeNetInfo = null;
-    if (this.interval) clearInterval(this.interval);
-    this.interval = null;
+    this.stopTicks?.();
+    this.stopTicks = null;
     // An open event keeps endedAt = null: we stopped watching, the outage didn't end.
     // Queued so it lands after any check already in flight.
     this.queue = this.queue.then(() => {

@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Switch, TextInput, Alert, TouchableOpacity, Keyboard, Linking } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Switch, TextInput, Alert, TouchableOpacity, Keyboard, Linking, AppState } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import * as Location from 'expo-location';
 import Constants from 'expo-constants';
+import BackgroundMonitor from '../../modules/background-monitor';
 import { getSettings, saveSettings, getStats, clearAll, Stats } from '../services/storage';
 import { AppSettings } from '../types';
 import { Card, SectionTitle } from '../components/Card';
@@ -16,6 +17,7 @@ export default function SettingsScreen() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [threshold, setThreshold] = useState('');
   const [stats, setStats] = useState<Stats | null>(null);
+  const [batteryUnrestricted, setBatteryUnrestricted] = useState(true);
 
   useEffect(() => {
     getSettings()
@@ -29,10 +31,27 @@ export default function SettingsScreen() {
   useFocusEffect(
     useCallback(() => {
       getStats().then(setStats).catch(() => {});
-      // Leaving the tab with the keyboard up blurs the input, so a typed threshold still gets saved.
-      return () => Keyboard.dismiss();
+      // Re-check when coming back from Android's battery dialog / settings.
+      const checkBattery = () => setBatteryUnrestricted(BackgroundMonitor?.isIgnoringBatteryOptimizations() ?? true);
+      checkBattery();
+      const sub = AppState.addEventListener('change', (state) => {
+        if (state === 'active') checkBattery();
+      });
+      return () => {
+        sub.remove();
+        // Leaving the tab with the keyboard up blurs the input, so a typed threshold still gets saved.
+        Keyboard.dismiss();
+      };
     }, [])
   );
+
+  const onAllowBackground = () => {
+    try {
+      BackgroundMonitor?.requestIgnoreBatteryOptimizations();
+    } catch {
+      Linking.openSettings(); // some phones don't have the dialog; app info has the battery setting
+    }
+  };
 
   const update = async (patch: Partial<AppSettings>) => {
     setSettings((s) => (s ? { ...s, ...patch } : s));
@@ -86,6 +105,28 @@ export default function SettingsScreen() {
         </View>
       </Card>
 
+      {BackgroundMonitor ? (
+        <Card>
+          <SectionTitle title="Background monitoring" subtitle="Keeps logging with the app closed and the screen off, while the notification is showing." />
+          <Row label="Battery optimization" value={
+            <Text style={{ color: batteryUnrestricted ? colors.success : colors.warning }}>
+              {batteryUnrestricted ? 'Off (good)' : 'On (may pause logging)'}
+            </Text>
+          } />
+          {!batteryUnrestricted ? (
+            <TouchableOpacity style={styles.primaryBtn} onPress={onAllowBackground}>
+              <Text style={{ color: '#fff', fontWeight: '600' }}>Allow running in background</Text>
+            </TouchableOpacity>
+          ) : null}
+          <Text style={{ color: colors.muted, fontSize: 12, marginTop: spacing.sm }}>
+            On Xiaomi, Oppo, Vivo, Realme and Samsung phones, also set this app's battery usage to "No restrictions" and turn on Autostart if your phone has it.
+          </Text>
+          <TouchableOpacity onPress={() => Linking.openSettings()} style={{ marginTop: spacing.sm }}>
+            <Text style={{ color: colors.primary, fontWeight: '600' }}>Open app settings</Text>
+          </TouchableOpacity>
+        </Card>
+      ) : null}
+
       <Card>
         <SectionTitle title="Data" />
         <Row label="Total events" value={<Text style={{ color: colors.text }}>{stats?.total ?? 0}</Text>} />
@@ -127,4 +168,5 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 const styles = StyleSheet.create({
   input: { borderWidth: 1, borderColor: colors.border, borderRadius: radii.md, padding: spacing.md, color: colors.text },
   dangerBtn: { marginTop: spacing.md, backgroundColor: colors.danger, padding: 12, borderRadius: radii.md, alignItems: 'center' },
+  primaryBtn: { marginTop: spacing.md, backgroundColor: colors.primary, padding: 12, borderRadius: radii.md, alignItems: 'center' },
 });
