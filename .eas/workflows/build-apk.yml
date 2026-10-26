@@ -1,0 +1,18 @@
+# Builds a new installable APK on EAS whenever app code is pushed to master.
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '**'
+      - '!**/*.md' # README-only pushes don't spend a build
+
+jobs:
+  build_android_apk:
+    name: Build Android APK
+    type: build
+    params:
+      platform: android
+      profile: preview
