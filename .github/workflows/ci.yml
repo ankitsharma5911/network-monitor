@@ -1,0 +1,84 @@
+# Every push and pull request: type-check, logic test, Expo health check, bundle.
+# Tag vX.Y.Z (created by `npm version`): build the APK on EAS and publish it as a GitHub Release.
+# Actions → CI → Run workflow: build a test APK from any branch (downloadable from the run page).
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Type-check
+        run: npx tsc --noEmit
+      - name: Monitor logic test
+        run: npm run check
+      - name: Expo health check
+        run: npx expo-doctor
+      - name: Bundle Android JavaScript
+        run: npx expo export --platform android --output-dir ${{ runner.temp }}/bundle
+
+  android:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: Tag must match package.json version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version. Release with: npm version patch|minor|major"
+            exit 1
+          fi
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build APK on EAS
+        run: eas build --platform android --profile production --non-interactive --wait --json > build.json
+
+      - name: Download APK
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "APK=network-monitor-v$version.apk" >> "$GITHUB_ENV"
+          curl -fsSL -o "network-monitor-v$version.apk" "$(jq -r '.[0].artifacts.buildUrl' build.json)"
+
+      - name: Upload APK to this run
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK }}
+          path: ${{ env.APK }}
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$APK" --title "Network Monitor $GITHUB_REF_NAME" --generate-notes

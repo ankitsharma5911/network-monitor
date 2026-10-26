@@ -17,12 +17,13 @@ Everything runs on the phone. There is no server and no account: events are stor
 
 1. [Features](#features)
 2. [Getting started](#getting-started)
-3. [Project structure](#project-structure)
-4. [High-level design](#high-level-design)
-5. [Mid-level design](#mid-level-design)
-6. [Low-level design](#low-level-design)
-7. [Testing](#testing)
-8. [Known limitations](#known-limitations)
+3. [Builds and releases](#builds-and-releases)
+4. [Project structure](#project-structure)
+5. [High-level design](#high-level-design)
+6. [Mid-level design](#mid-level-design)
+7. [Low-level design](#low-level-design)
+8. [Testing](#testing)
+9. [Known limitations](#known-limitations)
 
 ---
 
@@ -30,6 +31,7 @@ Everything runs on the phone. There is no server and no account: events are stor
 
 - **Outage detection.** Logs an event when the phone loses its connection, *and* when Wi-Fi stays connected but the internet behind it is dead (ISP down, router lost its uplink, captive login page).
 - **Slowdown detection.** Measures latency every 30 seconds and logs a "slow" event when it stays above a threshold you choose (default 1500 ms). Records the worst latency seen.
+- **Runs in the background.** In the installed APK, monitoring keeps going with the app closed and the screen off, shown by a permanent "Network Monitor" notification.
 - **No false alarms from blips.** A single slow or failed request is re-checked before anything is logged.
 - **Location.** Each event is tagged with GPS coordinates and, once the internet is back, a place name.
 - **History.** Filter by outages or slowdowns, add a note to any event, delete events.
@@ -43,7 +45,7 @@ Everything runs on the phone. There is no server and no account: events are stor
 ### Prerequisites
 
 - Node.js (current LTS)
-- The **Expo Go** app on an Android phone (for development), or an Expo account (for building an APK)
+- The **Expo Go** app on an Android phone, for quick development (foreground monitoring only)
 
 ### Run in development (Expo Go)
 
@@ -54,16 +56,11 @@ npm start
 
 Scan the QR code in the terminal with Expo Go. The phone and the PC must be on the same Wi-Fi network. If they can't reach each other, use `npx expo start --tunnel`.
 
-### Build an installable APK
+Expo Go can't load the app's own native code, so there it monitors only while the app is open. Background monitoring works in the APK.
 
-The `preview` profile in [`eas.json`](eas.json) builds a standalone `.apk` in Expo's cloud:
+### Install the app
 
-```bash
-npx eas-cli@latest login
-npx eas-cli@latest build -p android --profile preview
-```
-
-When the build finishes, EAS prints a download link and QR code for the APK.
+Download the latest `network-monitor-vX.Y.Z.apk` from the repository's **Releases** page and open it on the phone. A newer APK installs over an older one and keeps the recorded history.
 
 ### Useful commands
 
@@ -81,6 +78,41 @@ When the build finishes, EAS prints a download link and QR code for the APK.
 | An outage | Turn Airplane mode on for ~30 s, then off |
 | ISP down | Unplug the router's internet cable, keep Wi-Fi on |
 | A slowdown | Settings → set the slow threshold to `100` ms (set it back afterwards) |
+| Background mode (APK) | Press Home, lock the phone, then toggle Airplane mode for ~1 min. Unlock and check History. |
+
+---
+
+## Builds and releases
+
+All builds run through GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Nothing is built from a developer's PC.
+
+| When | What runs | Result |
+|---|---|---|
+| Push to `master`, or a pull request | Type-check, logic test, Expo health check, Android bundle | ✅ / ❌ on the commit or PR |
+| Push of a tag `vX.Y.Z` | The same checks, then an APK build on EAS | A **GitHub Release** `vX.Y.Z` with the APK attached and release notes generated from the commits |
+| Actions → CI → **Run workflow** | The same checks, then an APK build | APK downloadable from that run's page (for testing a branch) |
+
+### Releasing a new version
+
+The version lives only in `package.json` ([`app.config.js`](app.config.js) passes it to the app). From a clean `master`:
+
+```bash
+npm version minor          # 1.1.0 → 1.2.0: updates package.json, commits, creates tag v1.2.0
+git push --follow-tags     # pushes the commit and the tag → CI builds and publishes the release
+```
+
+Use `patch` for bug-fix releases (1.2.0 → 1.2.1) and `major` for big changes (1.2.0 → 2.0.0). The release job refuses to run if the tag and `package.json` disagree.
+
+Android's internal `versionCode` is not in the repo: EAS stores it and adds 1 on every build (`appVersionSource: remote`, `autoIncrement` in [`eas.json`](eas.json)), so each APK can always install over the previous one.
+
+### One-time setup
+
+The build job needs an Expo access token:
+
+1. On expo.dev: account **Settings → Access tokens → Create token**. Copy it.
+2. On GitHub: repository **Settings → Secrets and variables → Actions → New repository secret**, name `EXPO_TOKEN`, paste the token.
+
+APKs are signed with the key EAS stores for the project, so every release installs as an update.
 
 ---
 
@@ -91,7 +123,14 @@ network-monitor/
 ├── App.tsx                      # Startup: permissions, start monitoring, mount navigation
 ├── index.ts                     # Expo entry point
 ├── app.json                     # Expo config: package name, permissions, plugins
-├── eas.json                     # Cloud build profiles (preview = APK)
+├── app.config.js                # Takes the app version from package.json
+├── eas.json                     # EAS build profile (production = APK, auto-incremented versionCode)
+├── .github/workflows/ci.yml     # Checks on every push/PR; APK build + GitHub Release on tags
+├── modules/background-monitor/  # Local native module (Kotlin)
+│   ├── index.ts                 # JS wrapper; null in Expo Go
+│   └── android/src/main/
+│       ├── AndroidManifest.xml  # Service + permissions
+│       └── java/…/BackgroundMonitorModule.kt, MonitorService.kt
 ├── scripts/
 │   └── check-monitor.js         # Logic test for the outage/slow state machine
 └── src/
@@ -116,13 +155,14 @@ network-monitor/
 
 ### System context
 
-The app talks to three things outside itself, all on or through the phone. There is no backend.
+Everything the app talks to is on the phone, except one web address used to measure latency. There is no backend.
 
 ```mermaid
 flowchart LR
     User((User))
     subgraph Phone
         App[Network Monitor app]
+        Svc[Foreground service<br/>+ notification]
         DB[(SQLite database)]
         OS[Android connectivity service]
         GPS[Location services]
@@ -131,6 +171,8 @@ flowchart LR
     Probe[google.com/generate_204]
 
     User -- views / controls --> App
+    App -- start / stop --> Svc
+    Svc -- tick every 30 s,<br/>keeps app alive --> App
     OS -- connection changes --> App
     App -- latency probe over HTTPS --> Probe
     App -- position + place name --> GPS
@@ -164,6 +206,8 @@ From these, the app is always in one of three states, and every change of state 
 | Event time = when the change was reported | Even if a check waits behind a slow probe, the event's start and end times stay accurate. |
 | Location fetched after the event is saved | A GPS fix can take a long time. The event is logged instantly and coordinates are filled in later. |
 | Unknown end times stay unknown | If monitoring stops or the app is killed during an outage, the end time is left empty rather than guessed. |
+| Foreground service for background mode | Android only lets an app run continuously if it shows a permanent notification. Scheduled background jobs run at most every 15 minutes, which would miss short outages. |
+| Timer and probe timeout in native code | React Native freezes JavaScript timers while the app is in the background, even when a service is running. The service's native tick and a native HTTP probe keep working; all decision logic stays in one place, in TypeScript. |
 
 ---
 
@@ -194,14 +238,17 @@ flowchart TB
 
     NetInfo[[NetInfo]] --> Mon
     Loc[[expo-location]] --> Mon
-    Fetch[[fetch]] --> Mon
+    BG[[BackgroundMonitor<br/>native module]] -- ticks / probe --> Mon
+    Fetch[[fetch]] -. Expo Go fallback .-> Mon
     SQLite[[expo-sqlite]] --> Store
+    Set -- battery optimization --> BG
 ```
 
 | Module | Responsibility | Talks to |
 |---|---|---|
-| `App.tsx` | On launch: load settings, ask for location permission once (if not yet decided), start the monitor if logging is enabled, render navigation. | storage, networkMonitor |
-| `services/networkMonitor.ts` | Owns all detection logic. Listens to NetInfo, probes latency every 30 s, decides `ok`/`slow`/`down`, opens and closes events, attaches location. Notifies the UI on every change. | NetInfo, fetch, expo-location, storage |
+| `App.tsx` | On launch: load settings, ask for location permission once (if not yet decided) and notification permission (Android 13+), start the monitor if logging is enabled, render navigation. | storage, networkMonitor |
+| `services/networkMonitor.ts` | Owns all detection logic. Listens to NetInfo, probes latency every 30 s, decides `ok`/`slow`/`down`, opens and closes events, attaches location. Notifies the UI on every change. | NetInfo, BackgroundMonitor (or fetch + JS timer), expo-location, storage |
+| `modules/background-monitor` | Native Android module. `MonitorService` is a foreground service that shows the notification and holds a wake lock so the app keeps running. The module sends an `onTick` event every 30 s and runs the HTTP probe with real socket timeouts. No decisions are made here. | Android |
 | `services/storage.ts` | The only module that touches SQLite. Creates the schema on first use; CRUD for events; settings key/value; summary stats. | expo-sqlite |
 | `screens/*` | Display state and forward user actions. Hold no detection logic. | networkMonitor, storage, format |
 | `utils/format.ts` | Pure formatting: times, durations, status labels/colors, "Ongoing" vs "Unknown" duration text. | — |
@@ -255,7 +302,7 @@ sequenceDiagram
 | **Monitor** (Dashboard) | Live status (Online / Slow / Offline), latency, connection type, last check time; totals, downtime, average slow latency, last outage | Start / Stop logging; pull down to re-check now |
 | **History** | All events, newest first, with duration, peak latency, place | Filter All / Outages / Slow; tap to open; long-press to delete; Export CSV; Clear all |
 | **Event detail** | Every field of one event; refreshes live while open | Write and save a note |
-| **Settings** | Location toggle, slow threshold, data totals, app version | Toggle location (asks permission); edit threshold; clear history |
+| **Settings** | Location toggle, slow threshold, background-monitoring status (APK only), data totals, app version | Toggle location (asks permission); edit threshold; allow running in background; open app settings; clear history |
 
 ---
 
@@ -347,13 +394,45 @@ check(state, at):                       # at = time the trigger happened
 
 ```text
 probe(timeout):
-    start a timer that aborts the request after `timeout`
-    GET https://www.google.com/generate_204   (cache: no-store)
+    GET https://www.google.com/generate_204
     return elapsed ms if status = 204, otherwise null
-    on any error or abort: return null
+    on any error or timeout: return null
 ```
 
+- **APK:** `BackgroundMonitor.probe` uses Android's `HttpURLConnection` on its own thread, with connect and read timeouts and redirects off (a captive portal redirects instead of answering 204).
+- **Expo Go:** `fetch` with an `AbortController` that aborts after `timeout` (only works while the app is open, since the abort uses a JS timer).
+
 The timeout matters: React Native's networking has no default timeout, so without it a request on a dead network could hang indefinitely and block every later check.
+
+### Background mode
+
+```mermaid
+sequenceDiagram
+    participant M as networkMonitor (JS)
+    participant B as BackgroundMonitor (Kotlin)
+    participant S as MonitorService
+    participant A as Android
+
+    M->>B: addListener("onTick"), start(30000, title, text)
+    B->>S: startForegroundService
+    S->>A: startForeground(notification, type)
+    S->>A: acquire partial wake lock
+    loop every 30 s (app open, closed, or screen off)
+        B-->>M: onTick
+        M->>M: enqueue check → probe via B.probe
+    end
+    M->>B: stop() (user presses Stop)
+    B->>S: stopService → wake lock released, notification removed
+```
+
+| Detail | Choice |
+|---|---|
+| Service type (Android 14+) | `specialUse`, plus `location` when location permission is granted, which lets events detected in the background still get coordinates |
+| Notification | Low importance (no sound), ongoing, tapping it opens the app |
+| Wake lock | Partial (CPU only), held while monitoring is on |
+| If the process is killed | Service is **not** restarted (`START_NOT_STICKY`): a restarted service would have no JavaScript running, so it would show a notification while logging nothing. The notification disappearing tells the user monitoring stopped. |
+| If Android refuses to start the service | Starting a foreground service from the background is blocked on Android 12+. The monitor catches this and falls back to a JS interval (works while the app is open). |
+| Battery optimization | Settings shows whether Android's battery saver applies to the app and opens the system dialog to turn it off. While it's on, Doze mode can pause logging when the phone sits idle with the screen off. |
 
 ### Serialization and timing
 
@@ -365,8 +444,8 @@ The timeout matters: React Native's networking has no default timeout, so withou
 
 | Member | Description |
 |---|---|
-| `start()` | Subscribe to NetInfo (which immediately delivers the current state as the first check) and start the 30 s timer. No-op if already running. |
-| `stop()` | Unsubscribe, stop the timer, forget the open event. The event's end time is left empty, because the outage didn't end; we stopped watching. |
+| `start()` | Subscribe to NetInfo (which immediately delivers the current state as the first check) and start the 30 s ticks: the foreground service in the APK, a JS interval otherwise. No-op if already running. |
+| `stop()` | Unsubscribe, stop the ticks and the service, forget the open event. The event's end time is left empty, because the outage didn't end; we stopped watching. |
 | `setEnabled(on)` | Save `monitoringEnabled`, then `start()` or `stop()`. Used by the Start/Stop button. |
 | `refresh()` | Queue one check now; resolves when it's done. Logs events only while running; always updates `live`. |
 | `subscribe(cb)` | Call `cb` after every check / start / stop. Returns an unsubscribe function. |
@@ -417,6 +496,9 @@ The CSV is written to a file in the app's cache folder and shared with `expo-sha
 | Threshold set to nonsense | Rejected outside 100–60000 ms; previous value kept |
 | Typing a threshold then switching tabs | Keyboard is dismissed on leaving, which saves the value |
 | Database fails to open | That call fails; the next call retries the open |
+| App closed or screen off (APK) | Foreground service keeps ticks and probes running |
+| Android blocks starting the service | Falls back to a JS interval; logs a warning |
+| Process killed by the system | Notification disappears; logging resumes when the app is opened |
 
 ---
 
@@ -436,14 +518,19 @@ npm run check
 - ISP down while Wi-Fi stays connected → outage
 - Stop during an outage → end time left unknown
 - refresh while stopped → live status updates, nothing logged
+- APK path: the foreground service is started with the 30 s interval, a native tick plus the native probe log an outage, Stop ends the service
+- Android refuses to start the service → falls back to a JS interval, no leftover listener
 
-The screens are not covered by automated tests; verify them on a device with the steps in [Trying it out on a phone](#trying-it-out-on-a-phone).
+The Kotlin code and the screens are not covered by automated tests; verify them on a device with the steps in [Trying it out on a phone](#trying-it-out-on-a-phone).
 
 ---
 
 ## Known limitations
 
-- **Reliable only while the app is open.** When the app is in the background, Android pauses JavaScript timers, so the 30-second slowdown check stops. Outages reported by Android are still logged until the system closes the app. Continuous background logging would need an Android foreground service (a permanent notification), which is not implemented.
-- **No location in the background.** The app requests location only while in use, so events detected in the background have no coordinates.
+- **Phone makers' battery savers.** Xiaomi, Oppo, Vivo, Realme, Samsung and others can still stop background apps. Turn off battery optimization (Settings → Background monitoring) and, on those phones, set battery usage to "No restrictions" and enable Autostart.
+- **Doesn't restart by itself.** After a phone restart, or if the system kills the app, monitoring resumes only when the app is opened again.
+- **Battery use.** Background monitoring keeps the CPU awake and sends a small request every 30 seconds, so it uses noticeably more battery than an idle app.
+- **Background location needs location permission at start.** If location wasn't allowed when monitoring started, events detected in the background have no coordinates.
+- **Expo Go monitors only while open.** Background mode needs the APK.
 - **Depends on Google being reachable.** On networks that block `google.com`, every check looks like an outage. Change `PROBE_URL` in `networkMonitor.ts` for such networks.
 - **Very short handovers are logged.** Switching between Wi-Fi and mobile data can produce outages of a second or two. They are real, but may look noisy.
